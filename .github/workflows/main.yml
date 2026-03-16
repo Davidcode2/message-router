@@ -14,7 +14,7 @@ env:
 
   # Deployment configuration
   DEPLOYMENT_DIR: message-router
-  DEPLOYMENT_FILE: deployment.yaml
+  DEPLOYMENT_FILE: message-router-deployment.yaml
 
   # Build configuration
   DOCKERFILE: Dockerfile
