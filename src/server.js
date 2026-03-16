@@ -5,6 +5,7 @@ import { z } from 'zod';
 import configManager from './config.js';
 import { sendEmail, formatEmailContent } from './services/email.js';
 
+// Message Router - Multi-tenant form submission service
 const fastify = Fastify({
   logger: {
     level: process.env.LOG_LEVEL || 'info',
