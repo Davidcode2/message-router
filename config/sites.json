@@ -1,0 +1,7 @@
+{
+  "example-site": {
+    "recipient": "admin@example.com",
+    "subject": "New Contact Form Submission",
+    "allowed_origins": ["https://example.com", "http://localhost:3000"]
+  }
+}

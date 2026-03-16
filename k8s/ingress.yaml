@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: message-router
+  namespace: message-router
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.yourdomain.com
+      secretName: message-router-tls
+  rules:
+    - host: api.yourdomain.com
+      http:
+        paths:
+          - path: /v1/submit
+            pathType: Prefix
+            backend:
+              service:
+                name: message-router
+                port:
+                  number: 80
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: message-router
+                port:
+                  number: 80
+          - path: /readyz
+            pathType: Exact
+            backend:
+              service:
+                name: message-router
+                port:
+                  number: 80
