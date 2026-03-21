@@ -1,6 +1,6 @@
 {
   "name": "message-router",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Multi-tenant form submission router for customer websites",
   "main": "src/server.js",
   "type": "module",
