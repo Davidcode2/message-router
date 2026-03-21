@@ -1,4 +1,5 @@
 import { Resend } from 'resend';
+import { sanitizeEmail } from '../validation.js';
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@message-router.local';
@@ -11,7 +12,7 @@ export async function sendEmail({ to, subject, html, text, replyTo }) {
       subject,
       html,
       text,
-      replyTo,
+      replyTo: sanitizeEmail(replyTo),
     });
 
     if (error) {

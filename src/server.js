@@ -1,31 +1,17 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
-import { z } from 'zod';
 import configManager from './config.js';
 import { sendEmail, formatEmailContent } from './services/email.js';
+import { submissionSchema, redactEmail } from './validation.js';
+import { validateApiKey, validateOrigin } from './middleware.js';
 
-// Message Router - Multi-tenant form submission service
 const fastify = Fastify({
-  logger: {
-    level: process.env.LOG_LEVEL || 'info',
-  },
+  logger: { level: process.env.LOG_LEVEL || 'info' },
 });
 
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const API_KEY = process.env.API_KEY;
-
-const submissionSchema = z.object({
-  site_id: z.string().min(1),
-  email: z.string().email(),
-  message: z.string().min(1).max(5000),
-  name: z.string().max(200).optional(),
-  subject: z.string().max(200).optional(),
-  success_url: z.string().url().optional(),
-  error_url: z.string().url().optional(),
-  _website: z.string().optional(),
-}).passthrough();
 
 async function registerPlugins() {
   await fastify.register(rateLimit, {
@@ -41,61 +27,14 @@ async function registerPlugins() {
 
   await fastify.register(cors, {
     origin: (origin, cb) => {
-      if (!origin) {
-        cb(null, true);
-        return;
-      }
+      if (!origin) return cb(null, true);
       cb(null, true);
     },
     credentials: true,
   });
 }
 
-function checkApiKey(request, reply, done) {
-  if (!API_KEY) {
-    done();
-    return;
-  }
-
-  const providedKey = request.headers['x-api-key'];
-  if (!providedKey || providedKey !== API_KEY) {
-    reply.status(401).send({
-      error: 'Unauthorized',
-      message: 'Invalid or missing API key',
-    });
-    return;
-  }
-
-  done();
-}
-
-function checkOrigin(siteId) {
-  return async (request, reply) => {
-    const origin = request.headers.origin;
-
-    if (!configManager.hasSite(siteId)) {
-      reply.status(404).send({
-        error: 'Not Found',
-        message: 'Site not configured',
-      });
-      return;
-    }
-
-    const allowedOrigins = configManager.getAllowedOrigins(siteId);
-
-    if (origin && !allowedOrigins.includes(origin)) {
-      reply.status(403).send({
-        error: 'Forbidden',
-        message: 'Origin not allowed',
-      });
-      return;
-    }
-  };
-}
-
-fastify.get('/healthz', async () => {
-  return { status: 'healthy' };
-});
+fastify.get('/healthz', async () => ({ status: 'healthy' }));
 
 fastify.get('/readyz', async () => {
   const hasConfig = configManager.sites.size > 0;
@@ -108,95 +47,113 @@ fastify.get('/readyz', async () => {
 });
 
 fastify.post('/v1/submit', {
-  preHandler: [checkApiKey],
+  preHandler: [validateApiKey, validateOrigin],
   config: {
-    rateLimit: {
-      max: 5,
-      timeWindow: '1 hour',
-    },
+    rateLimit: { max: 5, timeWindow: '1 hour' },
   },
 }, async (request, reply) => {
   try {
     const validatedData = submissionSchema.parse(request.body);
-
-    const { site_id, email, message, name, subject, success_url, error_url, _website, ...extraFields } = validatedData;
+    const { site_id, email, message, name, subject, success_url, error_url, _website } = validatedData;
 
     if (_website) {
-      console.log(`Honeypot triggered for site: ${site_id}, IP: ${request.ip}`);
-      if (success_url) {
-        return reply.redirect(302, success_url);
-      }
-      return { success: true, message: 'Form submitted successfully' };
+      return handleHoneypot(reply, success_url, request.ip, request.log);
     }
 
     if (!configManager.hasSite(site_id)) {
-      if (error_url) {
-        return reply.redirect(302, error_url);
-      }
-      return reply.status(404).send({
-        error: 'Not Found',
-        message: 'Site not found',
-      });
+      return handleSiteNotFound(reply, error_url);
     }
 
     const siteConfig = configManager.getSite(site_id);
-    const origin = request.headers.origin;
 
-    if (origin && !configManager.isOriginAllowed(site_id, origin)) {
-      if (error_url) {
-        return reply.redirect(302, error_url);
-      }
-      return reply.status(403).send({
-        error: 'Forbidden',
-        message: 'Origin not allowed for this site',
-      });
+    if (!isOriginAllowed(request, site_id)) {
+      return handleForbidden(reply, error_url);
     }
 
-    const { html, text } = formatEmailContent({ name, email, subject, message, ...extraFields });
+    await sendFormEmail({ name, email, subject, message, siteConfig, validatedData });
 
-    await sendEmail({
-      to: siteConfig.recipient,
-      subject: siteConfig.subject,
-      html,
-      text,
-      replyTo: email,
-    });
+    logSuccess(site_id, email, siteConfig.recipient, request.log);
 
-    console.log(`Email sent for site: ${site_id}, from: ${email}, to: ${siteConfig.recipient}`);
-
-    if (success_url) {
-      return reply.redirect(302, success_url);
-    }
-
-    return {
-      success: true,
-      message: 'Form submitted successfully',
-    };
+    return handleSuccess(reply, success_url);
   } catch (error) {
-    console.error('Form submission error:', error.message);
-
-    if (error instanceof z.ZodError) {
-      const errorUrl = request.body?.error_url;
-      if (errorUrl) {
-        return reply.redirect(302, errorUrl);
-      }
-      return reply.status(400).send({
-        error: 'Validation Error',
-        message: error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', '),
-      });
-    }
-
-    const errorUrl = request.body?.error_url;
-    if (errorUrl) {
-      return reply.redirect(302, errorUrl);
-    }
-
-    return reply.status(500).send({
-      error: 'Internal Server Error',
-      message: 'Failed to process form submission',
-    });
+    return handleError(error, reply, request.body?.error_url, request.log);
   }
 });
+
+async function handleHoneypot(reply, successUrl, ip, log) {
+  log.warn(`Honeypot triggered from IP: ${ip}`);
+  if (successUrl) {
+    return reply.redirect(302, successUrl);
+  }
+  return { success: true, message: 'Form submitted successfully' };
+}
+
+function handleSiteNotFound(reply, errorUrl) {
+  if (errorUrl) {
+    return reply.redirect(302, errorUrl);
+  }
+  return reply.status(404).send({
+    error: 'Not Found',
+    message: 'Site not found',
+  });
+}
+
+function handleForbidden(reply, errorUrl) {
+  if (errorUrl) {
+    return reply.redirect(302, errorUrl);
+  }
+  return reply.status(403).send({
+    error: 'Forbidden',
+    message: 'Origin not allowed for this site',
+  });
+}
+
+function isOriginAllowed(request, siteId) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  return configManager.isOriginAllowed(siteId, origin);
+}
+
+async function sendFormEmail({ name, email, subject, message, siteConfig, validatedData }) {
+  const { html, text } = formatEmailContent({ name, email, subject, message });
+
+  await sendEmail({
+    to: siteConfig.recipient,
+    subject: siteConfig.subject,
+    html,
+    text,
+    replyTo: email,
+  });
+}
+
+function logSuccess(siteId, email, recipient, log) {
+  log.info(
+    `Email sent for site: ${siteId}, from: ${redactEmail(email)}, to: ${redactEmail(recipient)}`
+  );
+}
+
+function handleSuccess(reply, successUrl) {
+  if (successUrl) {
+    return reply.redirect(302, successUrl);
+  }
+  return {
+    success: true,
+    message: 'Form submitted successfully',
+  };
+}
+
+function handleError(error, reply, errorUrl, log) {
+  log.error({ error: error.message }, 'Form submission failed');
+
+  if (errorUrl) {
+    return reply.redirect(302, errorUrl);
+  }
+
+  return reply.status(500).send({
+    error: 'Internal Server Error',
+    message: 'Failed to process form submission',
+  });
+}
 
 async function start() {
   try {
